@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Skate 3D – teste</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#b8b8b8;font:14px/1.4 system-ui,sans-serif;color:#222}
+canvas{display:block}
+#hud{position:fixed;left:12px;top:12px;display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+#btns{display:flex;gap:6px}
+button{font:inherit;padding:8px 12px;border:1.5px solid #222;background:rgba(255,255,255,.7);border-radius:4px;cursor:pointer}
+button.on{background:#222;color:#fff}
+.box{background:rgba(255,255,255,.6);padding:6px 10px;border-radius:4px}
+#info{position:fixed;left:12px;bottom:12px}
+#msg{position:fixed;inset:0;display:grid;place-items:center;text-align:center;padding:2rem;pointer-events:none}
+#manobras{position:fixed;right:20px;bottom:20px;text-align:right;color:#fff;text-shadow:0 2px 6px rgba(0,0,0,.65);pointer-events:none;transition:opacity .5s}
+#manobras.some{opacity:0}
+#manobras div{transform-origin:right center}
+.atual{font-size:34px;font-weight:800;letter-spacing:1px;animation:pop .22s ease-out}
+.ant{font-size:13px;opacity:.7;text-transform:lowercase;line-height:1.3}
+.atual + .ant{animation:desce .3s ease-out}
+.pontos{margin-top:6px;font-size:18px;font-weight:700;color:#ffd23f}
+.pontos.soma{animation:pulso .35s ease-out}
+@keyframes pop{from{transform:scale(1.5);opacity:0}to{transform:none;opacity:1}}
+@keyframes desce{from{transform:translateY(-22px) scale(2.4);opacity:.9}to{transform:none;opacity:.7}}
+@keyframes pulso{50%{transform:scale(1.3)}}
+</style>
+</head>
+<body>
+<div id="hud">
+  
+  <span id="vel" class="box"></span>
+</div>
+<div id="info" class="box">W remar · S frear · A/D virar · botão direito do mouse: olhar em volta</div>
+<div id="manobras"></div>
+<p id="msg">Carregando…</p>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+<script src="models/Skate_3D.js"></script>
+<script src="models/Homem_3D.js"></script>
+<script src="mapas/parque.js"></script>
+<script src="controles/mobile.js"></script>
+<script src="controles/skatepedia.js"></script>
+<script>
+// ======== CONFIG ========
+// Modelos: models/Skate_3D.js e models/Homem_3D.js (seus HTMLs convertidos, carregados por <script>: não precisa de servidor).
+// Se abrir por um servidor, também lê os HTMLs originais da pasta models (nomes abaixo).
+const HTML_MODELOS = { homem: 'Homem 3D.html', skate: 'Skate 3D.html' };
+const COMPRIMENTO_SKATE = 1.1; // metros (o modelo original tem só 35 cm; é escalado)
+
+const $ = s => document.querySelector(s), msg = $('#msg');
+const V3 = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z), Q = () => new THREE.Quaternion();
+const AX = V3(1, 0, 0), AY = V3(0, 1, 0);
+const ry = a => Q().setFromAxisAngle(AY, a), rx = a => Q().setFromAxisAngle(AX, a);
+const ease = t => t * t * (3 - 2 * t);
+
+async function carregar(chave) {
+  let b64 = window.GLB_B64 && window.GLB_B64[chave];
+  if (!b64) { // plano B: ler o HTML original (só funciona via servidor)
+    try { const m = (await (await fetch(encodeURI('models/' + HTML_MODELOS[chave]))).text()).match(/id="glb">([\s\S]*?)<\/script>/); if (m) b64 = m[1]; } catch (e) { /* ignora */ }
+  }
+  if (!b64) throw new Error('Não achei models/' + (chave === 'homem' ? 'Homem_3D.js' : 'Skate_3D.js'));
+  const bin = atob(b64.trim()), b = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+  return b.buffer;
+}
+
+addEventListener('load', async () => {
+  if (!window.THREE || !THREE.GLTFLoader || !THREE.OrbitControls) { msg.textContent = 'Não foi possível carregar o three.js (precisa de internet).'; return; }
+
+  // ---------- cena ----------
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.outputEncoding = THREE.sRGBEncoding; renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.body.appendChild(renderer.domElement);
+  const scene = new THREE.Scene(), cam = new THREE.PerspectiveCamera(40, 1, 0.1, 300);
+  scene.background = new THREE.Color(0xb8b8b8); scene.fog = new THREE.Fog(0xb8b8b8, 25, 90);
+
+  // ambiente de estúdio (para os metais do skate terem reflexo)
+  (() => {
+    const s = new THREE.Scene(), geo = new THREE.SphereGeometry(50, 32, 16), p = geo.attributes.position, cols = [];
+    const top = new THREE.Color(0xffffff), bot = new THREE.Color(0x6b6f76), c = new THREE.Color();
+    for (let i = 0; i < p.count; i++) { c.copy(bot).lerp(top, (p.getY(i) / 50 + 1) / 2); cols.push(c.r, c.g, c.b); }
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+    s.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ side: THREE.BackSide, vertexColors: true })));
+    const pm = new THREE.PMREMGenerator(renderer); scene.environment = pm.fromScene(s, 0.04).texture; pm.dispose();
+  })();
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
+  Object.assign(sun.shadow.camera, { left: -4, right: 4, top: 4, bottom: -4, near: 1, far: 30 }); sun.shadow.bias = -0.0005;
+  scene.add(sun, sun.target);
+
+  // chão cinza "infinito": plano que segue o jogador, com a textura presa ao mundo
+  const cv = document.createElement('canvas'); cv.width = cv.height = 256;
+    const QUADRADO = 2; // tamanho de cada quadrado do chão, em metros
+  const g = cv.getContext('2d'); g.fillStyle = '#a0a0a0'; g.fillRect(0, 0, 256, 256); g.fillStyle = '#7a7a7a'; g.fillRect(0, 0, 128, 128); g.fillRect(128, 128, 128, 128);
+  const tex = new THREE.CanvasTexture(cv); tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(100 / QUADRADO, 100 / QUADRADO);
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy(); tex.encoding = THREE.sRGBEncoding;
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ map: tex, roughness: 1, metalness: 0 }));
+  ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+  
+    ground.visible = false; // o chão infinito antigo sai; o mapa novo vem de mapas/parque.js
+  if (!window.MAPA) { msg.textContent = 'Não achei mapas/parque.js (ele tem que ficar na pasta mapas/)'; return; }
+  const mapa = MAPA.construir(THREE, scene, renderer);
+
+  // ---------- modelos ----------
+  const loader = new THREE.GLTFLoader(), parse = b => new Promise((o, e) => loader.parse(b, '', o, e));
+  let gS, gH;
+  try { [gS, gH] = await Promise.all([carregar('skate').then(parse), carregar('homem').then(parse)]); }
+  catch (e) {
+    msg.innerHTML = 'Erro ao carregar os modelos.<br>' + e.message;
+    console.error(e); return;
+  }
+  const skate = new THREE.Group(), rig = new THREE.Group(); // skate: posição/direção no mundo | rig: homem alinhado ao skate
+  scene.add(skate); skate.add(rig);
+
+  // skate: escala pra 82 cm, rodas no chão (y=0), centrado
+  const sm = gS.scene, b0 = new THREE.Box3().setFromObject(sm), sz = b0.getSize(V3()), ct = b0.getCenter(V3()), k = COMPRIMENTO_SKATE / sz.z;
+  sm.scale.setScalar(k); sm.position.set(-ct.x * k, -b0.min.y * k, -ct.z * k); skate.add(sm);
+  const deckTop = (b0.max.y - b0.min.y) * k;
+      const boardG = new THREE.Group(), girG = new THREE.Group(), pivoY = deckTop * .5; boardG.position.y = pivoY; sm.position.y -= pivoY; girG.add(sm); boardG.add(girG); skate.add(boardG); // boardG: inclina o skate no ollie | girG: gira só o shape no flip
+  sm.traverse(o => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
+
+  // homem: toma a pose de espera da animação original como "pose de descanso"
+  const hm = gH.scene; rig.add(hm);
+  const bl = []; hm.traverse(o => { if (o.isBone) bl.push(o); if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
+  const mixer = new THREE.AnimationMixer(hm); mixer.clipAction(gH.animations[0]).play(); mixer.update(0); // (não atualizamos mais depois disso)
+  scene.updateMatrixWorld(true);
+  const wp = o => o.getWorldPosition(V3()), wq = o => o.getWorldQuaternion(Q());
+  const B = n => bl.find(b => b.name.replace(/_/g, ' ').includes(n));
+  const REST = new Map(bl.map(b => [b, { q: b.quaternion.clone(), w: wq(b) }]));
+  const limb = (a, b, c) => { a.userData.l1 = wp(a).distanceTo(wp(b)); a.userData.l2 = wp(b).distanceTo(wp(c)); return { a, b, c }; };
+  const legL = limb(B('L Thigh'), B('L Calf'), B('L Foot')), legR = limb(B('R Thigh'), B('R Calf'), B('R Foot'));
+  const armL = limb(B('L UpperArm'), B('L Forearm'), B('L Hand')), armR = limb(B('R UpperArm'), B('R Forearm'), B('R Hand'));
+  const root = B('Bip001 01'), chest = B('Spine1'), head = B('Head');
+  const ctrl = [chest, head, ...[legL, legR, armL, armR].flatMap(l => [l.a, l.b, l.c])];
+  const ankleH = wp(legL.c).y - wp(B('L Toe0')).y + 0.005; // altura do tornozelo até a sola
+  const DY = deckTop + ankleH;                              // altura do tornozelo com o pé em cima do shape
+  rig.rotation.y = -Math.PI / 2; // peito pro lado: +X do rig = bico do skate (stance "regular": pé esquerdo na frente)
+
+  // ---------- poses ----------
+  // [altura quadril, quadril x, giro tronco, inclinação, pé frente(x,y,z,giro,pitch), pé trás(...), mão esq(x,y,z), mão dir(x,y,z)]
+  // pés/quadril no referencial do rig (metros, y=0 é o chão); mãos relativas ao quadril, no referencial do tronco.
+  const pose = (H, hx, yaw, lean, ffy, bfy, lh, rh) => [H, hx, yaw, lean, .26, DY, -.05, ffy, 0, -.27, DY, -.05, bfy, 0, ...lh, ...rh];
+  const POSE = {
+    idle: pose(.725, 0, .5, .05, .3, .05, [.27, .02, .05], [-.27, .02, .05]),                 // parado: relaxado
+    ride: pose(.63, .04, .7, .22, .45, .1, [.62, .42, .2], [-.62, .3, 0])                        // andando: joelhos flexionados, braços abertos
+  };
+    function posePush(f) { // remando: A) pé sai do skate  B) empurra o chão  C) volta pro skate  D) desliza
+    const R = POSE.ride, mix = (a, b, t) => a + (b - a) * t, gy = p => ankleH * Math.cos(p) + .19 * Math.sin(p); // gy: altura do tornozelo com a ponta do pé no chão
+    const T = { x: R[9], y: R[10], z: R[11], yaw: R[12] }, G = { x: .10, z: .22, yaw: 1.25 }, PF = .55; // T = pé de trás no skate | G = onde pisa no chão
+    let L, sw = 0, x, y, z, yaw, p = 0;
+    if (f < .15) { const s = ease(f / .15); L = s; x = mix(T.x, G.x, s); z = mix(T.z, G.z, s); y = mix(T.y, ankleH, s) + .18 * Math.sin(Math.PI * s); yaw = mix(T.yaw, G.yaw, s); }
+    else if (f < .42) { const s = (f - .15) / .27, e = 1 - (1 - s) * (1 - s); L = 1; sw = e; x = mix(G.x, -.28, e); z = G.z; yaw = G.yaw; p = PF * ease(Math.max(0, (s - .4) / .6)); y = gy(p); }
+    else if (f < .55) { const s = ease((f - .42) / .13); L = 1 - s; sw = 1 - s; x = mix(-.28, T.x, s); z = mix(G.z, T.z, s); y = mix(gy(PF), T.y, s) + .12 * Math.sin(Math.PI * s); yaw = mix(G.yaw, T.yaw, s); p = PF * (1 - s); }
+    else { L = 0; x = T.x; y = T.y; z = T.z; yaw = T.yaw; }
+    return [mix(R[0], Math.max(.4, .64 - deckTop), L), mix(R[1], .10, L), mix(R[2], .95, L), mix(R[3], .38, L), R[4], R[5], R[6], R[7], R[8],
+      x, y, z, yaw, p, mix(R[14], .4, L), mix(R[15], .25, L), mix(R[16], .4 + .1 * sw, L), mix(R[17], -.4, L), mix(R[18], .2, L), mix(R[19], .25 - .35 * sw, L)];
+  }
+
+  // ---------- IK ----------
+  const tp = Q(), A = V3(), C = V3();
+  function setWQ(b, w) { b.parent.getWorldQuaternion(tp).invert(); b.quaternion.copy(tp.multiply(w)); b.updateMatrixWorld(true); }
+  function aim(b, c, t) {
+    const w = wq(b); b.getWorldPosition(A); c.getWorldPosition(C);
+    setWQ(b, Q().setFromUnitVectors(C.sub(A).normalize(), t.clone().sub(A).normalize()).multiply(w));
+  }
+  function ik2(l, tgt, pole) { // IK de 2 ossos (coxa/canela ou braço/antebraço) com vetor-guia do joelho/cotovelo
+    const l1 = l.a.userData.l1, l2 = l.a.userData.l2, a = wp(l.a), d = tgt.clone().sub(a);
+    let D = d.length(); d.divideScalar(D || 1); D = Math.min(Math.max(D, Math.abs(l1 - l2) + 1e-3), l1 + l2 - 1e-3);
+    const x = (l1 * l1 - l2 * l2 + D * D) / (2 * D), h = Math.sqrt(Math.max(l1 * l1 - x * x, 0));
+    const p = pole.clone().addScaledVector(d, -pole.dot(d)).normalize();
+    aim(l.a, l.b, a.clone().addScaledVector(d, x).addScaledVector(p, h));
+    aim(l.b, l.c, a.clone().addScaledVector(d, D));
+  }
+
+   // ---------- estado ----------
+  const W = { idle: 1, push: 0, ride: 0 }; let fase = 0, vel = 0, rumo = 0, giro = 0, camRumo = 0;
+  const keys = {}, P = new Array(20);
+  addEventListener('keydown', e => { keys[e.key.toLowerCase()] = 1; if (e.key.startsWith('Arrow')) e.preventDefault(); });
+  addEventListener('keyup', e => keys[e.key.toLowerCase()] = 0);
+  addEventListener('blur', () => { for (const k in keys) keys[k] = 0; });
+
+  // câmera em 3ª pessoa: fica atrás do skate e gira junto com ele
+    const CAM_DIST = 6, CAM_SUAVIDADE = 4, CAM_FOV = 55, CAM_PITCH_INICIAL = .13; // DIST: distância da câmera | suavidade: maior = acompanha a virada mais rápido
+  cam.fov = CAM_FOV;
+    let solo = 0, soloVis = 0, camY = 1, pitchT = 0, rollT = 0; const GRAV_RAMPA = 9; // GRAV_RAMPA: força da ladeira (m/s²); maior = rampas e bowl aceleram/freiam mais
+  skate.position.set(mapa.inicio.x, 0, mapa.inicio.z); rumo = mapa.inicio.rumo; camRumo = rumo; solo = soloVis = mapa.solo(mapa.inicio.x, mapa.inicio.z); // começa no ponto de partida do mapa
+  
+
+  // mouse: segure o botão direito e arraste para girar a câmera em volta do skate
+  const SENS_MOUSE = .004, CAM_VOLTA = true; // CAM_VOLTA: ao soltar o botão, a câmera volta pra trás do skate (false = fica onde parou)
+  let camOffset = 0, camPitch = CAM_PITCH_INICIAL, olhando = false; // camOffset: giro extra (rad) | camPitch: altura da câmera (rad)
+  // (cursor travado: some enquanto o botão direito está segurado, igual Roblox)
+  const tela = renderer.domElement, soltarMouse = () => { if (document.pointerLockElement) document.exitPointerLock(); };
+  addEventListener('contextmenu', e => e.preventDefault());
+  addEventListener('mousedown', e => { if (e.button === 2) { olhando = true; if (tela.requestPointerLock) tela.requestPointerLock(); } });
+  addEventListener('mouseup', e => { if (e.button === 2) { olhando = false; soltarMouse(); } });
+  addEventListener('blur', () => { olhando = false; soltarMouse(); });
+  document.addEventListener('pointerlockchange', () => { if (document.pointerLockElement && !olhando) soltarMouse(); else if (!document.pointerLockElement) olhando = false; });
+  addEventListener('mousemove', e => {
+    if (!olhando) return;
+    const mx = Math.max(-80, Math.min(80, e.movementX)), my = Math.max(-80, Math.min(80, e.movementY)); // limita picos do navegador
+    camOffset -= mx * SENS_MOUSE;
+    camPitch = Math.min(1.2, Math.max(-.1, camPitch + my * SENS_MOUSE));
+  });
+
+  
+  // ---------- manobras (setas) ----------
+      const OLLIE = { v0: 4.2, g: 16, janela: .45, bico: .5, segurar: .3, bonkExtra: .6, bonkTempo: .14, seguraAcel: 6, kick: .32, bicoExtra: .25, flipAntes: .25, esperaNome: .1, flipMinVoo: .36, flipExtra: .6, flipTarde: 4, flipTempo: .32, flipAlt: .17, varialV0: 3.9, varialBico: .35, varialGraus: 180, varialTempo: .3, varialJunto: .12 };
+  // v0: força do pulo | g: gravidade | janela: tempo (s) entre ↓ e ↑ | bico: quanto o bico sobe (rad) | esperaNome: espera (s) antes de mostrar OLLIE no painel
+  // BONKED: segurar: tempo (s) segurando ↑ p/ virar bonked | bonkExtra: força extra do pulo | kick: quanto o skate vai pra frente (m) | bicoExtra: bico extra (rad)
+  // FLIP (→ durante o ollie): flipExtra: impulso extra | flipTarde: impulso a mais se apertar tarde | flipMinVoo: voo que precisa sobrar pra girar (maior = janela menor) | flipTempo: duração do giro (s) | flipAlt: quanto os pés sobem (m) | flipAntes: o → também vale até esse tempo (s) ANTES do ↑
+    let bonk = false, tBonk = 0, bk = 0, flip = false, tFlip = 0, flipDur = .32, flipImp = 0, bonkIni = 0, tRight = -9;
+        let varial = false, varialDir = 1, tVarial = 0, yawBase = 0, tLeft = -9, flipDir = 1; // VARIAL/SHOVE-IT: shape girando na horizontal | varialDir: +1 pra frente, -1 pra trás | yawBase: quanto o shape já está virado | flipDir: +1 flip, -1 heelflip
+  function iniciarVarial(dir) { // ↓ + → = VARIAL (gira pra frente) | ↓ + ← = SHOVE-IT (gira pra trás): pula e o shape gira na horizontal
+    ar = true; tAr = 0; hAr = 0; vyAr = OLLIE.varialV0; tDown = -9; tRight = -9; tLeft = -9; varial = true; varialDir = dir; tVarial = 0; anunciada = true; mostrarManobra(dir > 0 ? 'varial' : 'shoveit');
+  }
+  addEventListener('keydown', e => {
+    if (e.repeat) return;
+    if (e.key === 'ArrowRight') { if (!ar && agora() - tDown < OLLIE.janela) iniciarVarial(1); else tRight = agora(); }   // ↓ e depois → = VARIAL | senão marca o → (flip)
+    else if (e.key === 'ArrowLeft') { if (!ar && agora() - tDown < OLLIE.janela) iniciarVarial(-1); else tLeft = agora(); } // ↓ e depois ← = SHOVE-IT
+    else if (e.key === 'ArrowDown' && !ar) { if (agora() - tRight < OLLIE.varialJunto) iniciarVarial(1); else if (agora() - tLeft < OLLIE.varialJunto) iniciarVarial(-1); } // → ou ← e logo depois ↓ também vale
+  });
+  
+  // ---------- sprint (Shift esquerdo) ----------
+  const SPRINT = { vmax: 12, forca: 2.3, ciclo: .5, fov: 14 }; // vmax: velocidade máxima (m/s) | forca: quanto mais forte cada remada | ciclo: quanto a remada acelera (s a menos por ciclo) | fov: quanto o campo de visão abre (graus)
+  let shiftEsq = false, sprintK = 0, vcap = 6.5;
+  addEventListener('keydown', e => { if (e.code === 'ShiftLeft') shiftEsq = true; });
+  addEventListener('keyup', e => { if (e.code === 'ShiftLeft') shiftEsq = false; });
+  addEventListener('blur', () => shiftEsq = false);
+  
+  const agora = () => performance.now() / 1000;
+  let tDown = -9, agacha = 0, ar = false, tAr = 0, hAr = 0, vyAr = 0, pouso = 0;
+  addEventListener('keydown', e => {
+    if (e.repeat) return;
+    if (e.key === 'ArrowDown') tDown = agora();                                                  // ↓ : agacha
+    else if (e.key === 'ArrowUp' && !ar && agora() - tDown < OLLIE.janela) { ar = true; tAr = 0; hAr = 0; vyAr = OLLIE.v0; tDown = -9; } // depois ↑ = OLLIE
+  });
+    const naTabua = p => boardG.localToWorld(p.clone().applyMatrix4(rig.matrix).sub(V3(0, pivoY, 0))); // ponto do rig -> mundo, acompanhando inclinação e chute do skate
+
+    // ---------- placar de manobras (canto inferior direito) ----------  
+            const MANOBRAS = { ollie: { nome: 'OLLIE', pontos: 10 }, bonked: { nome: 'BONNED OLLIE', pontos: 10 }, flip: { nome: 'FLIP', pontos: 20 }, varial: { nome: 'VARIAL', pontos: 15 }, shoveit: { nome: 'SHOVE-IT', pontos: 15 }, heelflip: { nome: 'HEELFLIP', pontos: 20 } }; // nome e pontos de cada manobra
+  const COMBO = { soma: 1, fim: 3.5, contagem: .6 }; // soma: segundos até os pontos se somarem | fim: segundos sem manobra pra encerrar o combo | contagem: duração da animação dos pontos
+  let anunciada = false; const combo = { nomes: [], total: 0, pend: 0, tSoma: 0, tFim: 0, raf: 0 };
+  const painelManobras = document.getElementById('manobras');
+  const textoPontos = () => combo.total + ' pontos' + (combo.pend ? ' + ' + combo.pend + ' pontos' : '');
+  function desenharCombo() { // manobra atual grande, as anteriores pequenas embaixo, pontos por último
+    const [atual, ...ant] = combo.nomes;
+    painelManobras.classList.remove('some');
+    painelManobras.innerHTML = `<div class="atual">${atual}</div>` + ant.map(n => `<div class="ant">${n}</div>`).join('') + `<div class="pontos">${textoPontos()}</div>`;
+  }
+  function somarPontos() { // "10 pontos + 10 pontos" vira "20 pontos" com a contagem subindo
+    clearTimeout(combo.tSoma); if (!combo.pend) return;
+    const de = combo.total, ate = de + combo.pend, t0 = performance.now(), el = painelManobras.querySelector('.pontos');
+    combo.total = ate; combo.pend = 0; cancelAnimationFrame(combo.raf);
+    el.classList.remove('soma'); void el.offsetWidth; el.classList.add('soma');
+    const passo = agoraMs => { const k = Math.min(1, (agoraMs - t0) / (COMBO.contagem * 1000)); el.textContent = Math.round(de + (ate - de) * k) + ' pontos'; if (k < 1) combo.raf = requestAnimationFrame(passo); };
+    combo.raf = requestAnimationFrame(passo);
+  }
+    function desfazerUltima() { // o flip entra no lugar do OLLIE que acabou de aparecer
+    clearTimeout(combo.tSoma); cancelAnimationFrame(combo.raf); combo.nomes.shift();
+    if (combo.pend) combo.pend = 0; else combo.total -= combo.ultimo;
+  }
+  function mostrarManobra(chave) {
+    const m = MANOBRAS[chave]; combo.ultimo = m.pontos;
+    clearTimeout(combo.tSoma); clearTimeout(combo.tFim); cancelAnimationFrame(combo.raf);
+    combo.total += combo.pend; combo.pend = 0;                       // se ainda estava somando, termina agora
+    combo.nomes.unshift(m.nome); if (combo.nomes.length > 5) combo.nomes.pop(); // a mais nova fica em cima
+    if (combo.total === 0) combo.total = m.pontos;                   // 1ª manobra do combo: só "10 pontos"
+    else { combo.pend = m.pontos; combo.tSoma = setTimeout(somarPontos, COMBO.soma * 1000); } // as próximas: "10 pontos + 10 pontos", soma depois de 1 s
+    desenharCombo();
+    combo.tFim = setTimeout(encerrarCombo, COMBO.fim * 1000);
+  }
+  function encerrarCombo() { // ficou um tempo sem manobra: o combo some
+    painelManobras.classList.add('some');
+    setTimeout(() => { if (painelManobras.classList.contains('some')) { combo.nomes = []; combo.total = 0; combo.pend = 0; painelManobras.innerHTML = ''; } }, 600);
+  }
+  const resize = () => { renderer.setSize(innerWidth, innerHeight); cam.aspect = innerWidth / innerHeight; cam.updateProjectionMatrix(); };
+  addEventListener('resize', resize); resize(); msg.style.display = 'none';
+
+  const clock = new THREE.Clock();
+  renderer.setAnimationLoop(() => {
+      if (window.JOGO_PAUSADO) { clock.getDelta(); return; } // Skatepédia aberta: jogo pausado
+        const dt = Math.min(clock.getDelta(), .05);
+      const frente = keys.w, freio = keys.s, esq = keys.a, dir = keys.d;
+    const est = ar ? 'ride' : frente ? 'push' : vel > .4 ? 'ride' : 'idle'; // no ar: pose de andar | W remando | rolando | parado
+
+    // movimento do skate
+        const sprint = shiftEsq && frente && !ar;                                              // Shift esquerdo + W = SPRINT
+    sprintK += ((sprint ? 1 : 0) - sprintK) * Math.min(1, 5 * dt);                          // 0..1: força do sprint (suave)
+    vcap += ((sprint ? SPRINT.vmax : 6.5) - vcap) * Math.min(1, (sprint ? 4 : .5) * dt);    // velocidade máxima: sobe rápido, desce devagar
+    if (frente && !ar && fase > .15 && fase < .42) vel += 6 * (1 + SPRINT.forca * sprintK) * Math.sin(Math.PI * (fase - .15) / .27) * dt; // cada remada dá um impulso (maior no sprint)
+        vel = Math.min(Math.max(vel, 0), vcap);
+    if (freio && !ar) vel -= 7 * dt;   // S freia
+    if (est === 'idle') vel -= 3 * dt;  // quase parado: para de vez
+    vel = Math.min(Math.max(vel, 0), 6.5);
+    giro += (((esq ? 1 : 0) - (dir ? 1 : 0)) * 1.8 / (1 + vel * .12) - giro) * Math.min(1, 8 * dt); // A/D: vira (suave)
+    rumo += giro * dt;
+        vel = Math.max(0, vel - GRAV_RAMPA * Math.sin(pitchT) * dt);                               // ladeira: descer acelera, subir freia
+    const x0 = skate.position.x, z0 = skate.position.z;                                        // posição antes de mover
+    let x1 = x0 + Math.sin(rumo) * vel * dt, z1 = z0 + Math.cos(rumo) * vel * dt;
+    const yAbs = solo + hAr;                                                                   // altura atual do skate
+    if (mapa.bloqueia(x1, z1, yAbs)) {                                                         // bateu (parede, corrimão, caixote): desliza ou para
+      if (!mapa.bloqueia(x1, z0, yAbs)) z1 = z0; else if (!mapa.bloqueia(x0, z1, yAbs)) x1 = x0; else { x1 = x0; z1 = z0; }
+      vel *= 1 - Math.min(1, 5 * dt);
+    }
+    skate.position.x = x1; skate.position.z = z1;
+    const soloNovo = mapa.solo(x1, z1);
+    if (ar) hAr = Math.max(0, yAbs - soloNovo);                                                // no ar: mantém a altura de verdade
+    solo = soloNovo; soloVis = Math.abs(solo - soloVis) > .3 ? soloVis + (solo - soloVis) * Math.min(1, 18 * dt) : solo; // queda grande: desce rápido, sem teleporte
+    const inc = mapa.inclinacao(x1, z1, rumo);                                                 // inclinação do chão (rad)
+    pitchT += (inc.pitch - pitchT) * Math.min(1, 14 * dt); rollT += (inc.roll - rollT) * Math.min(1, 14 * dt);
+    skate.rotation.order = 'YXZ'; skate.rotation.set(-pitchT, rumo, -rollT);                    // o skate acompanha o chão
+
+            // ollie: pulo + bico do skate subindo e nivelando  (↑ segurado = BONKED OLLIE | → durante o ollie = FLIP | ↓ + → = VARIAL)
+    agacha += ((!ar && agora() - tDown < OLLIE.janela ? 1 : 0) - agacha) * Math.min(1, 12 * dt); // ↓ apertado: agacha
+    const impFlip = OLLIE.flipExtra + OLLIE.flipTarde * tAr, restaFlip = ar ? (vyAr + impFlip + Math.sqrt((vyAr + impFlip) ** 2 + 2 * OLLIE.g * hAr)) / OLLIE.g : 0; // impulso do flip (maior se apertou tarde) e quanto voo sobraria
+        const tTecla = Math.max(tRight, tLeft), dirF = tLeft > tRight ? -1 : 1; // último → (FLIP) ou ← (HEELFLIP)
+    if (ar && !flip && !bonk && !varial && tTecla >= agora() - tAr - OLLIE.flipAntes && restaFlip > OLLIE.flipMinVoo) { // → ou ← durante o ollie (ainda dá tempo de girar)
+      flip = true; flipDir = dirF; tFlip = 0; tBonk = 0; flipImp = impFlip; flipDur = Math.min(OLLIE.flipTempo, restaFlip - .2); // giro mais rápido se apertou mais tarde
+      if (anunciada) desfazerUltima();                                                                       // o OLLIE que já tinha aparecido vira FLIP / HEELFLIP
+      anunciada = true; mostrarManobra(dirF > 0 ? 'flip' : 'heelflip');
+    }
+    if (ar && !bonk && !flip && !varial && tAr > OLLIE.segurar && keys.arrowup) { bonk = true; tBonk = 0; bonkIni = tAr; } // ↑ segurado bastante: vira bonked ollie
+    if ((bonk || flip) && tBonk < OLLIE.bonkTempo) { vyAr += (bonk ? OLLIE.bonkExtra : flipImp) / OLLIE.bonkTempo * dt; tBonk += dt; } // empurrão extra no pulo
+    if (ar && !varial && tAr > OLLIE.esperaNome && keys.arrowup && !flip && vyAr > 0) vyAr += OLLIE.seguraAcel * dt; // segurar o ↑ na subida: o pulo vai um pouco mais alto
+    if (flip) tFlip += dt;
+    if (varial) tVarial += dt;
+    bk += ((bonk ? 1 : 0) - bk) * Math.min(1, 8 * dt);
+    if (ar) { tAr += dt; vyAr -= OLLIE.g * dt; hAr += vyAr * dt; if (hAr <= 0 && vyAr < 0) { hAr = 0; ar = false; bonk = false; bk = 0; flip = false; pouso = 1; } }
+        if (!ar && varial) { yawBase = (yawBase + varialDir * OLLIE.varialGraus * Math.PI / 180) % (2 * Math.PI); varial = false; } // pousou: o shape fica virado (180° = nariz pra trás); no shove-it ele gira pro outro lado
+    if (ar && !anunciada && tAr > OLLIE.esperaNome && (bonk || !keys.arrowup)) { anunciada = true; mostrarManobra(bonk ? 'bonked' : 'ollie'); } // soltou o ↑ = OLLIE | segurou = BONNED OLLIE
+    if (!ar) anunciada = false;
+    pouso = Math.max(0, pouso - 4 * dt);
+    const tVoo = ar ? tAr + (vyAr + Math.sqrt(vyAr * vyAr + 2 * OLLIE.g * hAr)) / OLLIE.g : 1; // duração total prevista do voo
+    const u = ar ? Math.min(tAr / tVoo, 1) : 0;
+    const kick = bonk ? Math.sin(Math.PI * Math.min(1, Math.max(0, (tAr - bonkIni) / Math.max(.25, tVoo * .85 - bonkIni)))) : 0; // 0..1..0 a partir do instante do bonked: o skate vai pra frente e volta
+    const bico = ar ? OLLIE.bico * (varial ? OLLIE.varialBico : 1) * (u < .15 ? ease(u / .15) : 1 - ease(Math.min(1, (u - .15) / .45))) + OLLIE.bicoExtra * kick : 0;
+        const giroFlip = flip ? flipDir * 2 * Math.PI * ease(Math.min(1, Math.max(0, (tFlip - .05) / flipDur))) : 0; // o shape gira 360° (só o shape, os pés não); flipDir -1 = heelflip (gira pro outro lado)
+    const elev = flip ? OLLIE.flipAlt * ease(Math.min(1, tFlip / .07)) * (1 - ease(Math.min(1, Math.max(0, (tFlip - .05 - flipDur * .75) / .15)))) * Math.min(1, Math.max(0, (tVoo - tAr) / .12)) : 0; // pés sobem pra não bater no shape girando
+    const dH = ar ? ((-.16 + .06 * ease(Math.min(1, Math.max(0, (u - .15) / .4)))) * (1 - ease(Math.min(1, Math.max(0, (u - .6) / .4)))) - .04 * kick + .6 * elev) : -.16 * agacha - .12 * pouso; // quadril: agacha no estalo, encolhe no ar
+        const varialAng = varial ? varialDir * Math.PI * OLLIE.varialGraus / 180 * ease(Math.min(1, Math.max(0, (tVarial - .04) / OLLIE.varialTempo))) : 0; // o shape gira na horizontal (só o shape)
+        skate.position.y = soloVis + hAr; boardG.position.z = OLLIE.kick * kick; boardG.rotation.x = -bico; girG.rotation.z = giroFlip; girG.rotation.y = -(yawBase + varialAng);
+	    skate.updateMatrixWorld(true);
+		
+    for (const n in W) W[n] += ((est === n ? 1 : 0) - W[n]) * Math.min(1, 6 * dt);
+        if (W.push > .02) fase = (fase + dt / (1.4 - SPRINT.ciclo * sprintK)) % 1; else fase = 0;
+    const s = W.idle + W.ride + W.push, cand = { idle: POSE.idle, ride: POSE.ride, push: posePush(fase) };
+    P.fill(0); for (const n in W) for (let i = 0; i < 20; i++) P[i] += cand[n][i] * W[n] / s;
+    const [H, hx, yaw, lean] = P, rq = rig.getWorldQuaternion(Q()), Qt = ry(yaw).multiply(rx(lean)), pelv = V3(hx, DY + H, 0);
+
+    // reseta ossos controlados, posiciona o quadril e gira o tronco
+    ctrl.forEach(b => b.quaternion.copy(REST.get(b).q));
+    root.parent.updateWorldMatrix(true, false); root.position.copy(root.parent.worldToLocal(rig.localToWorld(pelv.clone())));
+    setWQ(root, rq.clone().multiply(ry(yaw * .55)).multiply(rx(lean)).multiply(REST.get(root).w));
+    setWQ(chest, rq.clone().multiply(ry(yaw * .45)).multiply(rq.clone().invert()).multiply(wq(chest)));
+    setWQ(head, rq.clone().multiply(ry(yaw * .25)).multiply(rx(-lean * .7)).multiply(rq.clone().invert()).multiply(wq(head)));
+
+        P[0] += dH; P[1] += .5 * OLLIE.kick * kick; // agachar/pular mexe no quadril; no bonked ele acompanha metade do chute
+		    P[3] += .15 * sprintK * W.push; // sprint: tronco mais inclinado pra frente
+
+        // pernas e pés (acompanham a inclinação do skate no ollie)
+    const qb = skate.getWorldQuaternion(Q()), qbi = qb.clone().invert(); qb.multiply(boardG.quaternion).multiply(qbi);
+    [[legL, 4], [legR, 9]].forEach(([l, i]) => {
+      const fy = P[i + 3], pole = V3(Math.sin(fy), .15, Math.cos(fy)).applyQuaternion(rq);
+            ik2(l, naTabua(V3(P[i], P[i + 1] + elev, P[i + 2])), pole);
+      setWQ(l.c, qb.clone().multiply(rq).multiply(ry(fy)).multiply(rx(P[i + 4])).multiply(REST.get(l.c).w));
+    });
+    // braços
+    [[armL, 14, 1], [armR, 17, -1]].forEach(([l, i, sg]) => {
+      const off = V3(P[i], P[i + 1], P[i + 2]).applyQuaternion(Qt), pole = V3(sg * .4, -1, -.5).applyQuaternion(Qt).applyQuaternion(rq);
+      ik2(l, rig.localToWorld(pelv.clone().add(off)), pole);
+    });
+
+    // câmera, luz e chão seguem o skate
+            let dc = rumo - camRumo; dc = Math.atan2(Math.sin(dc), Math.cos(dc)); camRumo += dc * (1 - Math.exp(-CAM_SUAVIDADE * dt)); // câmera acompanha o giro
+    if (!olhando && CAM_VOLTA) { const k = 1 - Math.exp(-3 * dt); camOffset -= camOffset * k; camPitch += (CAM_PITCH_INICIAL - camPitch) * k; } // soltou o botão: volta pra trás
+    const sp = skate.position, t = sp, ang = camRumo + camOffset, dx = Math.sin(ang), dz = Math.cos(ang), cp = Math.cos(camPitch);
+    const px = sp.x + dx * 1.5, pz = sp.z + dz * 1.5; // ponto que a câmera olha (um pouco à frente do skate)
+        camY += (soloVis + 1 - camY) * Math.min(1, 6 * dt);                                       // câmera acompanha a altura do chão
+    cam.position.set(px - dx * cp * CAM_DIST, camY + Math.sin(camPitch) * CAM_DIST, pz - dz * cp * CAM_DIST);
+    cam.lookAt(px, camY, pz);
+    cam.lookAt(px, 1, pz);
+	    const fovAlvo = CAM_FOV + SPRINT.fov * Math.min(1, Math.max(0, (vel - 6) / 6)); // campo de visão abre com a velocidade
+    cam.fov += (fovAlvo - cam.fov) * Math.min(1, 4 * dt); cam.updateProjectionMatrix();
+    sun.position.set(t.x + 4, 9, t.z + 3); sun.target.position.set(t.x, 0, t.z);
+    ground.position.set(skate.position.x, 0, skate.position.z); tex.offset.set(skate.position.x / (2 * QUADRADO), -skate.position.z / (2 * QUADRADO));
+    $('#vel').textContent = ({ idle: 'Parado', push: 'Remando', ride: 'Andando' })[est] + ' · ' + (vel * 3.6).toFixed(0) + ' km/h';
+    renderer.render(scene, cam);
+  });
+});
+</script>
+
+</body>
+</html>
